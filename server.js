@@ -1,17 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const BlockResourcesPlugin = require('puppeteer-extra-plugin-block-resources');
-const PQueue = require('p-queue').default;
-require('dotenv').config();
-
-// Use stealth plugin
-puppeteer.use(StealthPlugin());
-
-// Block unnecessary resources - but NOT scripts!
-puppeteer.use(BlockResourcesPlugin({
-    blockedTypes: new Set(['image', 'stylesheet', 'font', 'media'])
-}));
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json());
