@@ -6,9 +6,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-// Queue for managing concurrent requests
-const queue = new PQueue({ concurrency: 3 });
-
 // Browser instance pool
 let browserPool = [];
 const MAX_BROWSERS = 2;
@@ -29,12 +26,6 @@ const BROWSER_ARGS = [
     '--disable-dev-profile'
 ];
 
-// Add proxy args if configured
-if (process.env.PROXY_URL) {
-    const proxyUrl = new URL(process.env.PROXY_URL);
-    BROWSER_ARGS.push(`--proxy-server=${proxyUrl.protocol}//${proxyUrl.host}`);
-}
-
 // Initialize browser pool
 async function initBrowserPool() {
     for (let i = 0; i < MAX_BROWSERS; i++) {
@@ -50,42 +41,32 @@ async function initBrowserPool() {
 
 // Launch a single browser
 async function launchBrowser() {
-    const launchOptions = {
+    return await puppeteer.launch({
         headless: 'new',
         args: BROWSER_ARGS,
-        ignoreDefaultArgs: ['--enable-automation'],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
-    };
-
-    // Add authentication if proxy needs it
-    if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
-        launchOptions.args.push(
-            `--proxy-auth=${process.env.PROXY_USERNAME}:${process.env.PROXY_PASSWORD}`
-        );
-    }
-
-    return await puppeteer.launch(launchOptions);
+        ignoreDefaultArgs: ['--enable-automation']
+    });
 }
 
 // Get available browser from pool
 async function getBrowser() {
-    // Find available browser
     let browserObj = browserPool.find(b => !b.busy);
     
-    if (!browserObj) {
-        // All browsers busy, create new one if under limit
-        if (browserPool.length < MAX_BROWSERS) {
-            const browser = await launchBrowser();
-            browserObj = { browser, busy: true };
-            browserPool.push(browserObj);
-        } else {
-            // Wait for available browser
-            await new Promise(resolve => setTimeout(resolve, 100));
-            return getBrowser();
-        }
+    if (!browserObj && browserPool.length > 0) {
+        // Wait a bit and try again
+        await new Promise(resolve => setTimeout(resolve, 100));
+        browserObj = browserPool.find(b => !b.busy);
     }
     
-    browserObj.busy = true;
+    if (!browserObj) {
+        // Create new browser if needed
+        const browser = await launchBrowser();
+        browserObj = { browser, busy: true };
+        browserPool.push(browserObj);
+    } else {
+        browserObj.busy = true;
+    }
+    
     return browserObj;
 }
 
@@ -97,7 +78,7 @@ function releaseBrowser(browserObj) {
 }
 
 // Main scraping function
-async function scrapeWithOptimizations(url, options = {}) {
+async function scrapeWithOptimizations(url) {
     const startTime = Date.now();
     let browserObj = null;
     let page = null;
@@ -115,35 +96,23 @@ async function scrapeWithOptimizations(url, options = {}) {
         
         // Enhanced stealth measures
         await page.evaluateOnNewDocument(() => {
-            // Override webdriver
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
             
-            // Add chrome object
             window.chrome = {
                 runtime: {},
                 loadTimes: function() {},
                 csi: function() {}
             };
             
-            // Mock plugins
             Object.defineProperty(navigator, 'plugins', {
                 get: () => [1, 2, 3, 4, 5]
             });
             
-            // Mock languages
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['en-US', 'en']
             });
-            
-            // Mock permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
         });
         
         // Set extra headers
@@ -155,14 +124,6 @@ async function scrapeWithOptimizations(url, options = {}) {
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         });
-        
-        // Add proxy authentication if needed
-        if (process.env.PROXY_USERNAME && process.env.PROXY_PASSWORD) {
-            await page.authenticate({
-                username: process.env.PROXY_USERNAME,
-                password: process.env.PROXY_PASSWORD
-            });
-        }
         
         console.log('🚀 Starting navigation to:', url);
         
@@ -197,14 +158,13 @@ async function scrapeWithOptimizations(url, options = {}) {
                 // Check if title changed (means we passed Cloudflare)
                 if (!currentTitle.includes('Just a moment')) {
                     console.log('✅ Passed Cloudflare check');
-                    // Wait a bit more for final redirect
                     await page.waitForTimeout(2000);
                     break;
                 }
             }
         }
         
-        // Final wait to ensure all redirects completed
+        // Final wait
         await page.waitForTimeout(1000);
         
         // Get final URL and content
@@ -235,12 +195,9 @@ async function scrapeWithOptimizations(url, options = {}) {
         };
         
     } finally {
-        // Clean up
         if (page) {
             await page.close().catch(() => {});
         }
-        
-        // Release browser back to pool
         if (browserObj) {
             releaseBrowser(browserObj);
         }
@@ -265,18 +222,15 @@ app.post('/v1', async (req, res) => {
         console.log(`📨 New Request at ${new Date().toISOString()}`);
         console.log(`🔗 URL: ${url}`);
         console.log(`⏱️ Timeout: ${maxTimeout}ms`);
-        console.log(`${process.env.PROXY_URL ? '🌐 Using Proxy' : '📡 Direct Connection'}`);
         console.log(`${'='.repeat(60)}\n`);
         
-        // Add to queue
-        const result = await queue.add(async () => {
-            return await Promise.race([
-                scrapeWithOptimizations(url, { session }),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Timeout')), maxTimeout)
-                )
-            ]);
-        });
+        // Run scraping with timeout
+        const result = await Promise.race([
+            scrapeWithOptimizations(url),
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), maxTimeout)
+            )
+        ]);
         
         if (result.success) {
             const elapsed = Date.now() - startTime;
@@ -329,12 +283,10 @@ app.get('/health', async (req, res) => {
         uptime: Math.round(process.uptime()) + 's',
         browsers: browserPool.length,
         activeBrowsers: browserPool.filter(b => b.busy).length,
-        queueSize: queue.size,
         memory: {
             used: Math.round(memory.heapUsed / 1024 / 1024) + 'MB',
             total: Math.round(memory.heapTotal / 1024 / 1024) + 'MB'
-        },
-        proxy: process.env.PROXY_URL ? 'configured' : 'none'
+        }
     });
 });
 
@@ -343,14 +295,7 @@ app.get('/', (req, res) => {
     res.send(`
         <h1>⚡ Ultra-Fast Puppeteer Scraper v4.0</h1>
         <p><strong>Status:</strong> Running</p>
-        <p><strong>Features:</strong></p>
-        <ul>
-            <li>Browser Pool (${browserPool.length} browsers)</li>
-            <li>Smart Cloudflare Bypass</li>
-            <li>Proxy Support: ${process.env.PROXY_URL ? '✅ Configured' : '❌ Not configured'}</li>
-            <li>Queue Management</li>
-            <li>Enhanced Stealth Mode</li>
-        </ul>
+        <p><strong>Browsers:</strong> ${browserPool.length} active</p>
         <p><strong>Endpoints:</strong></p>
         <ul>
             <li>POST /v1 - Main scraping endpoint</li>
@@ -365,7 +310,6 @@ app.listen(PORT, '0.0.0.0', async () => {
 ╔════════════════════════════════════════╗
 ║   ⚡ Ultra-Fast Puppeteer Scraper v4.0  ║
 ║   Port: ${PORT}                            ║
-║   Proxy: ${process.env.PROXY_URL ? 'Configured ✅' : 'Not configured ❌'}     ║
 ╚════════════════════════════════════════╝
     `);
     
@@ -383,7 +327,7 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
-// Handle uncaught errors
+// Handle errors
 process.on('uncaughtException', (error) => {
     console.error('💥 Uncaught Exception:', error);
 });
