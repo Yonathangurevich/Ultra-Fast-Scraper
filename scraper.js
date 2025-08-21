@@ -1,8 +1,4 @@
-const { chromium } = require('playwright-extra');
-const stealth = require('playwright-extra-plugin-stealth');
-
-// Use stealth plugin
-chromium.use(stealth());
+const { chromium } = require('playwright');
 
 // Browser pool for reuse
 let browserInstance = null;
@@ -19,20 +15,14 @@ async function initBrowser() {
                 '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
                 '--window-size=1920,1080'
-            ],
-            // Use proxy if configured
-            proxy: process.env.PROXY_URL ? {
-                server: process.env.PROXY_URL,
-                username: process.env.PROXY_USERNAME,
-                password: process.env.PROXY_PASSWORD
-            } : undefined
+            ]
         });
     }
     return browserInstance;
 }
 
 async function fastScrape(url, options = {}) {
-    const { browser, useProxy, session } = options;
+    const { browser, session } = options;
     const startTime = Date.now();
     
     let context = null;
@@ -47,16 +37,7 @@ async function fastScrape(url, options = {}) {
             timezoneId: 'America/New_York'
         };
         
-        // Add proxy if needed and not already in browser
-        if (useProxy && process.env.PROXY_URL && !browserInstance.proxy) {
-            contextOptions.proxy = {
-                server: process.env.PROXY_URL,
-                username: process.env.PROXY_USERNAME,
-                password: process.env.PROXY_PASSWORD
-            };
-        }
-        
-        context = await browserInstance.newContext(contextOptions);
+        context = await browser.newContext(contextOptions);
         
         // Create page
         page = await context.newPage();
@@ -76,14 +57,6 @@ async function fastScrape(url, options = {}) {
                 app: {}
             };
             
-            // Mock permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-            
             // Mock plugins
             Object.defineProperty(navigator, 'plugins', {
                 get: () => [1, 2, 3, 4, 5]
@@ -97,7 +70,7 @@ async function fastScrape(url, options = {}) {
         
         // Set extra headers
         await page.setExtraHTTPHeaders({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
@@ -118,7 +91,7 @@ async function fastScrape(url, options = {}) {
         // Smart wait for PartsOuq
         let finalUrl = page.url();
         let attempts = 0;
-        const maxAttempts = 10;
+        const maxAttempts = 20; // Increased attempts
         
         while (attempts < maxAttempts && !finalUrl.includes('ssd=')) {
             await page.waitForTimeout(500);
@@ -127,15 +100,15 @@ async function fastScrape(url, options = {}) {
             finalUrl = page.url();
             
             // Check if we got redirected
-            if (finalUrl !== url) {
-                console.log(`🔄 Redirected to: ${finalUrl.substring(0, 80)}...`);
+            if (finalUrl !== url && finalUrl.includes('/catalog/genuine/vehicle')) {
+                console.log(`🔄 Redirected to catalog: ${finalUrl.substring(0, 80)}...`);
             }
             
             // Check for Cloudflare
             const title = await page.title();
             if (title.includes('Just a moment')) {
                 console.log('☁️ Cloudflare detected, waiting...');
-                await page.waitForTimeout(1000);
+                await page.waitForTimeout(2000); // More wait for Cloudflare
             }
             
             // Check for ssd parameter
@@ -145,6 +118,11 @@ async function fastScrape(url, options = {}) {
             }
             
             attempts++;
+            
+            // Log progress
+            if (attempts % 5 === 0) {
+                console.log(`⏳ Still waiting... attempt ${attempts}/${maxAttempts}`);
+            }
         }
         
         // Final wait for content
