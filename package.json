@@ -1,0 +1,22 @@
+{
+  "name": "playwright-fast-scraper",
+  "version": "3.0.0",
+  "description": "Ultra-fast Playwright scraper optimized for PartsOuq",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.40.0",
+    "playwright-extra": "^4.3.6",
+    "playwright-extra-plugin-stealth": "^2.11.2",
+    "p-queue": "^6.6.2",
+    "dotenv": "^16.3.1",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
