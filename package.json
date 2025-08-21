@@ -1,19 +1,14 @@
 {
   "name": "puppeteer-ultra-scraper",
   "version": "4.0.0",
-  "description": "Ultra-fast Puppeteer scraper with proxy support",
+  "description": "Ultra-fast Puppeteer scraper",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.5.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "puppeteer-extra-plugin-block-resources": "^2.4.3",
-    "dotenv": "^16.3.1",
-    "p-queue": "^6.6.2"
+    "puppeteer": "^21.5.0"
   },
   "engines": {
     "node": ">=18.0.0"
