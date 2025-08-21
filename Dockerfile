@@ -1,3 +1,6 @@
+FROM node:18-slim
+
+# Install Chrome dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -31,17 +34,8 @@ RUN npm install
 # Copy app files
 COPY . .
 
-# Create user for Puppeteer
-RUN groupadd -r pptruser && useradd -r -g pptruser pptruser \
-    && mkdir -p /home/pptruser/.cache/puppeteer \
-    && chown -R pptruser:pptruser /home/pptruser \
-    && chown -R pptruser:pptruser /app
-
-USER pptruser
-
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppeteer
 
 EXPOSE 8080
 
