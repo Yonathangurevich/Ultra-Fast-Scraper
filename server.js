@@ -6,11 +6,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-// Browser instance pool
+// Browser instance pool - הגבלה קבועה!
 let browserPool = [];
-const MAX_BROWSERS = 2;
+const MAX_BROWSERS = 1; // ⚡ הורדנו ל-1 לחסוך זיכרון
+const MAX_REQUESTS_PER_BROWSER = 50; // נסגור browser אחרי 50 requests
 
-// Browser launch options
+// ✅ Browser launch options מיטובים לזיכרון
 const BROWSER_ARGS = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -20,64 +21,143 @@ const BROWSER_ARGS = [
     '--disable-web-security',
     '--disable-gpu',
     '--no-first-run',
-    '--window-size=1920,1080',
-    '--single-process',
+    '--window-size=1366,768', // 🔥 הקטנו מ-1920x1080
+    // ❌ הסרנו --single-process שאוכל הרבה זיכרון!
     '--disable-accelerated-2d-canvas',
-    '--disable-dev-profile'
+    '--disable-dev-profile',
+    '--memory-pressure-off', // ✅ תוספת לניהול זיכרון
+    '--max_old_space_size=512', // ✅ הגבלת זיכרון Node.js
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding'
 ];
+
+// מעקב requests per browser
+const browserStats = new Map();
 
 // Initialize browser pool
 async function initBrowserPool() {
+    console.log('🚀 Initializing optimized browser pool...');
     for (let i = 0; i < MAX_BROWSERS; i++) {
         try {
-            const browser = await launchBrowser();
-            browserPool.push({ browser, busy: false });
-            console.log(`✅ Browser ${i + 1} initialized`);
+            const browserObj = await createNewBrowser();
+            if (browserObj) {
+                browserPool.push(browserObj);
+                console.log(`✅ Browser ${i + 1} initialized with memory limits`);
+            }
         } catch (error) {
             console.error(`❌ Failed to init browser ${i + 1}:`, error.message);
         }
     }
 }
 
-// Launch a single browser
-async function launchBrowser() {
-    return await puppeteer.launch({
-        headless: 'new',
-        args: BROWSER_ARGS,
-        ignoreDefaultArgs: ['--enable-automation']
-    });
+// יצירת browser חדש עם מעקב
+async function createNewBrowser() {
+    try {
+        const browser = await puppeteer.launch({
+            headless: 'new',
+            args: BROWSER_ARGS,
+            ignoreDefaultArgs: ['--enable-automation']
+        });
+        
+        const browserId = Date.now() + Math.random();
+        browserStats.set(browserId, { requests: 0, created: Date.now() });
+        
+        return { 
+            browser, 
+            busy: false, 
+            id: browserId,
+            requests: 0 
+        };
+    } catch (error) {
+        console.error('❌ Failed to create browser:', error.message);
+        return null;
+    }
 }
 
 // Get available browser from pool
 async function getBrowser() {
+    // נסה למצוא browser פנוי
     let browserObj = browserPool.find(b => !b.busy);
     
-    if (!browserObj && browserPool.length > 0) {
-        // Wait a bit and try again
-        await new Promise(resolve => setTimeout(resolve, 100));
-        browserObj = browserPool.find(b => !b.busy);
+    if (!browserObj) {
+        console.log('⏳ All browsers busy, waiting...');
+        // חכה עד שישתחרר browser (לא יוצר חדש!)
+        for (let i = 0; i < 100; i++) { // עד 10 שניות
+            await new Promise(resolve => setTimeout(resolve, 100));
+            browserObj = browserPool.find(b => !b.busy);
+            if (browserObj) break;
+        }
     }
     
     if (!browserObj) {
-        // Create new browser if needed
-        const browser = await launchBrowser();
-        browserObj = { browser, busy: true };
-        browserPool.push(browserObj);
-    } else {
-        browserObj.busy = true;
+        throw new Error('No browsers available - all busy');
     }
     
+    // בדוק אם Browser עשה יותר מדי requests
+    if (browserObj.requests >= MAX_REQUESTS_PER_BROWSER) {
+        console.log(`🔄 Browser ${browserObj.id} reached request limit, recreating...`);
+        await recycleBrowser(browserObj);
+    }
+    
+    browserObj.busy = true;
+    browserObj.requests++;
+    
     return browserObj;
+}
+
+// מחזור browser שעשה יותר מדי requests
+async function recycleBrowser(browserObj) {
+    try {
+        // סגור browser ישן
+        await browserObj.browser.close();
+        browserStats.delete(browserObj.id);
+        
+        // צור browser חדש
+        const newBrowserObj = await createNewBrowser();
+        if (newBrowserObj) {
+            // החלף במקום הישן
+            const index = browserPool.indexOf(browserObj);
+            browserPool[index] = newBrowserObj;
+            console.log(`✅ Browser recycled successfully`);
+        }
+    } catch (error) {
+        console.error('❌ Error recycling browser:', error.message);
+    }
 }
 
 // Release browser back to pool
 function releaseBrowser(browserObj) {
     if (browserObj) {
         browserObj.busy = false;
+        console.log(`📤 Browser ${browserObj.id} released (${browserObj.requests} requests)`);
     }
 }
 
-// Main scraping function
+// ✅ פונקציה לניקוי זיכרון כל דקה
+async function memoryCleanup() {
+    console.log('\n' + '='.repeat(50));
+    console.log('🧹 Running memory cleanup...');
+    
+    const memBefore = process.memoryUsage();
+    console.log(`📊 Memory before: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB`);
+    
+    // Force garbage collection
+    if (global.gc) {
+        global.gc();
+    }
+    
+    const memAfter = process.memoryUsage();
+    console.log(`📊 Memory after: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB`);
+    console.log(`💾 Saved: ${Math.round((memBefore.heapUsed - memAfter.heapUsed) / 1024 / 1024)}MB`);
+    
+    // סטטיסטיקות browsers
+    console.log(`🌐 Active browsers: ${browserPool.length}`);
+    console.log(`⚡ Busy browsers: ${browserPool.filter(b => b.busy).length}`);
+    console.log('='.repeat(50) + '\n');
+}
+
+// Main scraping function - מיטוב לזיכרון
 async function scrapeWithOptimizations(url) {
     const startTime = Date.now();
     let browserObj = null;
@@ -87,11 +167,12 @@ async function scrapeWithOptimizations(url) {
         console.log('🎯 Getting browser from pool...');
         browserObj = await getBrowser();
         
-        // Create new page
+        // Create new page עם הגבלות זיכרון
         page = await browserObj.browser.newPage();
         
-        // Set viewport and user agent
-        await page.setViewport({ width: 1920, height: 1080 });
+        // ✅ הגבלת זיכרון לדף
+        await page.setCacheEnabled(false); // חסוך זיכרון
+        await page.setViewport({ width: 1366, height: 768 }); // גודל קטן יותר
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         // Enhanced stealth measures
@@ -125,57 +206,47 @@ async function scrapeWithOptimizations(url) {
             'Upgrade-Insecure-Requests': '1'
         });
         
-        console.log('🚀 Starting navigation to:', url);
+        console.log('🚀 Starting navigation to:', url.substring(0, 100) + '...');
         
-        // Navigate with smart waiting
+        // Navigate עם timeout קצר יותר
         await page.goto(url, {
-            waitUntil: ['domcontentloaded', 'networkidle2'],
-            timeout: 25000
+            waitUntil: ['domcontentloaded'], // ✅ רק domcontentloaded, לא networkidle2
+            timeout: 20000 // ✅ הקטנו מ-25000
         });
         
-        // Check for Cloudflare and wait for redirect
+        // Check for Cloudflare and wait for redirect - מיטוב
         const title = await page.title();
-        console.log(`📄 Initial title: ${title}`);
+        console.log(`📄 Initial title: ${title.substring(0, 50)}...`);
         
         if (title.includes('Just a moment') || title.includes('Checking your browser')) {
             console.log('☁️ Cloudflare detected, waiting for bypass...');
             
-            // Smart waiting for PartsOuq redirect
-            for (let i = 0; i < 15; i++) {
+            // Smart waiting מקוצר
+            for (let i = 0; i < 10; i++) { // ✅ הקטנו מ-15 ל-10
                 await page.waitForTimeout(1000);
                 
                 const currentUrl = page.url();
                 const currentTitle = await page.title();
                 
-                console.log(`⏳ Attempt ${i + 1}/15 - Checking for redirect...`);
+                console.log(`⏳ Attempt ${i + 1}/10 - Checking...`);
                 
-                // Check if we got the full URL with ssd parameter
-                if (currentUrl.includes('ssd=')) {
-                    console.log(`✅ Success! Found complete URL with ssd parameter`);
-                    break;
-                }
-                
-                // Check if title changed (means we passed Cloudflare)
-                if (!currentTitle.includes('Just a moment')) {
+                if (currentUrl.includes('ssd=') || !currentTitle.includes('Just a moment')) {
                     console.log('✅ Passed Cloudflare check');
-                    await page.waitForTimeout(2000);
                     break;
                 }
             }
         }
         
-        // Final wait
-        await page.waitForTimeout(1000);
+        // Final wait קצר יותר
+        await page.waitForTimeout(500); // ✅ הקטנו מ-1000
         
-        // Get final URL and content
+        // Get final results
         const finalUrl = page.url();
         const html = await page.content();
         const cookies = await page.cookies();
         const elapsed = Date.now() - startTime;
         
-        console.log(`✅ Final URL: ${finalUrl.substring(0, 100)}...`);
-        console.log(`⏱️ Completed in ${elapsed}ms`);
-        console.log(`🎯 Has ssd param: ${finalUrl.includes('ssd=') ? 'YES ✅' : 'NO ❌'}`);
+        console.log(`✅ Completed in ${elapsed}ms - Has ssd: ${finalUrl.includes('ssd=') ? 'YES' : 'NO'}`);
         
         return {
             success: true,
@@ -195,8 +266,10 @@ async function scrapeWithOptimizations(url) {
         };
         
     } finally {
+        // ✅ ניקוי יסודי
         if (page) {
             await page.close().catch(() => {});
+            page = null; // Clear reference
         }
         if (browserObj) {
             releaseBrowser(browserObj);
@@ -209,7 +282,7 @@ app.post('/v1', async (req, res) => {
     const startTime = Date.now();
     
     try {
-        const { cmd, url, maxTimeout = 30000, session } = req.body;
+        const { cmd, url, maxTimeout = 25000, session } = req.body; // ✅ הקטנו timeout
         
         if (!url) {
             return res.status(400).json({
@@ -218,11 +291,7 @@ app.post('/v1', async (req, res) => {
             });
         }
         
-        console.log(`\n${'='.repeat(60)}`);
-        console.log(`📨 New Request at ${new Date().toISOString()}`);
-        console.log(`🔗 URL: ${url}`);
-        console.log(`⏱️ Timeout: ${maxTimeout}ms`);
-        console.log(`${'='.repeat(60)}\n`);
+        console.log(`\n📨 Request: ${url.substring(0, 80)}... (${maxTimeout}ms timeout)`);
         
         // Run scraping with timeout
         const result = await Promise.race([
@@ -234,13 +303,7 @@ app.post('/v1', async (req, res) => {
         
         if (result.success) {
             const elapsed = Date.now() - startTime;
-            
-            console.log(`\n${'='.repeat(60)}`);
-            console.log(`✅ SUCCESS - Total time: ${elapsed}ms`);
-            console.log(`🔗 Final URL: ${result.url?.substring(0, 120) || 'N/A'}...`);
-            console.log(`📄 HTML Length: ${result.html?.length || 0} bytes`);
-            console.log(`🎯 Has ssd param: ${result.hasSSd ? 'YES ✅' : 'NO ❌'}`);
-            console.log(`${'='.repeat(60)}\n`);
+            console.log(`✅ SUCCESS - ${elapsed}ms - ${result.html?.length || 0} bytes`);
             
             res.json({
                 status: 'ok',
@@ -254,7 +317,7 @@ app.post('/v1', async (req, res) => {
                 },
                 startTimestamp: startTime,
                 endTimestamp: Date.now(),
-                version: '4.0.0',
+                version: '4.1.0-memory-optimized',
                 hasSSd: result.hasSSd || false
             });
         } else {
@@ -262,9 +325,7 @@ app.post('/v1', async (req, res) => {
         }
         
     } catch (error) {
-        console.error(`\n${'='.repeat(60)}`);
-        console.error('❌ REQUEST FAILED:', error.message);
-        console.error(`${'='.repeat(60)}\n`);
+        console.error(`❌ REQUEST FAILED:`, error.message);
         
         res.status(500).json({
             status: 'error',
@@ -274,7 +335,7 @@ app.post('/v1', async (req, res) => {
     }
 });
 
-// Health check
+// Enhanced health check
 app.get('/health', async (req, res) => {
     const memory = process.memoryUsage();
     
@@ -285,22 +346,26 @@ app.get('/health', async (req, res) => {
         activeBrowsers: browserPool.filter(b => b.busy).length,
         memory: {
             used: Math.round(memory.heapUsed / 1024 / 1024) + 'MB',
-            total: Math.round(memory.heapTotal / 1024 / 1024) + 'MB'
-        }
+            total: Math.round(memory.heapTotal / 1024 / 1024) + 'MB',
+            external: Math.round(memory.external / 1024 / 1024) + 'MB'
+        },
+        browserStats: Array.from(browserStats.entries()).map(([id, stats]) => ({
+            id: id.toString().substring(-8),
+            requests: stats.requests,
+            age: Math.round((Date.now() - stats.created) / 1000) + 's'
+        }))
     });
 });
 
 // Root
 app.get('/', (req, res) => {
+    const memory = process.memoryUsage();
     res.send(`
-        <h1>⚡ Ultra-Fast Puppeteer Scraper v4.0</h1>
+        <h1>⚡ Memory-Optimized Puppeteer v4.1</h1>
         <p><strong>Status:</strong> Running</p>
-        <p><strong>Browsers:</strong> ${browserPool.length} active</p>
-        <p><strong>Endpoints:</strong></p>
-        <ul>
-            <li>POST /v1 - Main scraping endpoint</li>
-            <li>GET /health - System status</li>
-        </ul>
+        <p><strong>Memory:</strong> ${Math.round(memory.heapUsed / 1024 / 1024)}MB used</p>
+        <p><strong>Browsers:</strong> ${browserPool.length} (${browserPool.filter(b => b.busy).length} busy)</p>
+        <p><strong>Optimizations:</strong> ✅ Memory limits, ✅ Browser recycling, ✅ Auto cleanup</p>
     `);
 });
 
@@ -308,30 +373,39 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`
 ╔════════════════════════════════════════╗
-║   ⚡ Ultra-Fast Puppeteer Scraper v4.0  ║
+║   ⚡ Memory-Optimized Scraper v4.1     ║
 ║   Port: ${PORT}                            ║
+║   Max Browsers: ${MAX_BROWSERS}                     ║
+║   Memory Limits: ENABLED ✅            ║
 ╚════════════════════════════════════════╝
     `);
     
-    console.log('🚀 Initializing browser pool...');
+    console.log('🚀 Initializing optimized browser pool...');
     await initBrowserPool();
-    console.log('✅ Ready to scrape!');
+    
+    // ✅ הפעלת ניקוי זיכרון כל דקה
+    setInterval(memoryCleanup, 60000);
+    console.log('✅ Ready with memory management!');
 });
 
-// Graceful shutdown
+// Graceful shutdown עם ניקוי יסודי
 process.on('SIGTERM', async () => {
-    console.log('📛 SIGTERM received, closing browsers...');
+    console.log('📛 SIGTERM received, cleaning up...');
     for (const browserObj of browserPool) {
         await browserObj.browser.close().catch(() => {});
     }
+    browserPool = [];
+    browserStats.clear();
     process.exit(0);
 });
 
 // Handle errors
 process.on('uncaughtException', (error) => {
-    console.error('💥 Uncaught Exception:', error);
+    console.error('💥 Uncaught Exception:', error.message);
+    // נסה לנקות זיכרון
+    if (global.gc) global.gc();
 });
 
 process.on('unhandledRejection', (error) => {
-    console.error('💥 Unhandled Rejection:', error);
+    console.error('💥 Unhandled Rejection:', error.message);
 });
