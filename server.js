@@ -55,9 +55,12 @@ async function initBrowserPool() {
 async function createNewBrowser() {
     try {
         const browser = await puppeteer.launch({
-            headless: 'new',
-            args: BROWSER_ARGS,
-            ignoreDefaultArgs: ['--enable-automation']
+            headless: true,
+            args: [...BROWSER_ARGS, '--disable-features=site-per-process'],
+            ignoreDefaultArgs: ['--enable-automation'],
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false
         });
         
         const browserId = Date.now() + Math.random();
