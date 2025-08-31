@@ -35,6 +35,10 @@ const BROWSER_ARGS = [
 // מעקב requests per browser
 const browserStats = new Map();
 
+// משתנה למעקב ניקויים אחרונים - רק לצורך debug נדיר
+let lastCleanupTime = Date.now();
+let cleanupCount = 0;
+
 // Initialize browser pool
 async function initBrowserPool() {
     console.log('🚀 Initializing optimized browser pool...');
@@ -43,7 +47,7 @@ async function initBrowserPool() {
             const browserObj = await createNewBrowser();
             if (browserObj) {
                 browserPool.push(browserObj);
-                console.log(`✅ Browser ${i + 1} initialized with memory limits`);
+                console.log(`✅ Browser ${i + 1} initialized`);
             }
         } catch (error) {
             console.error(`❌ Failed to init browser ${i + 1}:`, error.message);
@@ -84,7 +88,6 @@ async function getBrowser() {
     let browserObj = browserPool.find(b => !b.busy);
     
     if (!browserObj) {
-        console.log('⏳ All browsers busy, waiting...');
         // חכה עד שישתחרר browser (לא יוצר חדש!)
         for (let i = 0; i < 100; i++) { // עד 10 שניות
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -99,7 +102,6 @@ async function getBrowser() {
     
     // בדוק אם Browser עשה יותר מדי requests
     if (browserObj.requests >= MAX_REQUESTS_PER_BROWSER) {
-        console.log(`🔄 Browser ${browserObj.id} reached request limit, recreating...`);
         await recycleBrowser(browserObj);
     }
     
@@ -109,7 +111,7 @@ async function getBrowser() {
     return browserObj;
 }
 
-// מחזור browser שעשה יותר מדי requests
+// מחזור browser שעשה יותר מדי requests - בשקט!
 async function recycleBrowser(browserObj) {
     try {
         // סגור browser ישן
@@ -122,10 +124,11 @@ async function recycleBrowser(browserObj) {
             // החלף במקום הישן
             const index = browserPool.indexOf(browserObj);
             browserPool[index] = newBrowserObj;
-            console.log(`✅ Browser recycled successfully`);
+            // לא מדפיסים כלום! עובד בשקט
         }
     } catch (error) {
-        console.error('❌ Error recycling browser:', error.message);
+        // רק אם יש בעיה קריטית
+        console.error('❌ Critical error recycling browser:', error.message);
     }
 }
 
@@ -133,31 +136,31 @@ async function recycleBrowser(browserObj) {
 function releaseBrowser(browserObj) {
     if (browserObj) {
         browserObj.busy = false;
-        console.log(`📤 Browser ${browserObj.id} released (${browserObj.requests} requests)`);
+        // לא מדפיסים כל release - רק משחררים בשקט
     }
 }
 
-// ✅ פונקציה לניקוי זיכרון כל דקה
-async function memoryCleanup() {
-    console.log('\n' + '='.repeat(50));
-    console.log('🧹 Running memory cleanup...');
-    
-    const memBefore = process.memoryUsage();
-    console.log(`📊 Memory before: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB`);
-    
-    // Force garbage collection
-    if (global.gc) {
-        global.gc();
+// ✅ פונקציה שקטה לניקוי זיכרון - בלי לוגים!
+async function silentMemoryCleanup() {
+    try {
+        // Force garbage collection בשקט
+        if (global.gc) {
+            global.gc();
+        }
+        
+        cleanupCount++;
+        
+        // רק אם עברו 10 דקות (10 ניקויים) נדפיס סטטוס קצר
+        if (cleanupCount % 10 === 0) {
+            const memory = process.memoryUsage();
+            console.log(`[${new Date().toLocaleTimeString()}] Memory: ${Math.round(memory.heapUsed / 1024 / 1024)}MB | Browsers: ${browserPool.filter(b => !b.busy).length}/${browserPool.length} free`);
+        }
+    } catch (error) {
+        // אפילו שגיאות - לא מדפיסים אלא אם הן קריטיות
+        if (error.message.includes('critical') || error.message.includes('fatal')) {
+            console.error('❌ Critical cleanup error:', error.message);
+        }
     }
-    
-    const memAfter = process.memoryUsage();
-    console.log(`📊 Memory after: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB`);
-    console.log(`💾 Saved: ${Math.round((memBefore.heapUsed - memAfter.heapUsed) / 1024 / 1024)}MB`);
-    
-    // סטטיסטיקות browsers
-    console.log(`🌐 Active browsers: ${browserPool.length}`);
-    console.log(`⚡ Busy browsers: ${browserPool.filter(b => b.busy).length}`);
-    console.log('='.repeat(50) + '\n');
 }
 
 // Main scraping function - מיטוב לזיכרון
@@ -167,7 +170,6 @@ async function scrapeWithOptimizations(url) {
     let page = null;
     
     try {
-        console.log('🎯 Getting browser from pool...');
         browserObj = await getBrowser();
         
         // Create new page עם הגבלות זיכרון
@@ -209,8 +211,6 @@ async function scrapeWithOptimizations(url) {
             'Upgrade-Insecure-Requests': '1'
         });
         
-        console.log('🚀 Starting navigation to:', url.substring(0, 100) + '...');
-        
         // Navigate עם timeout קצר יותר
         await page.goto(url, {
             waitUntil: ['domcontentloaded'], // ✅ רק domcontentloaded, לא networkidle2
@@ -219,11 +219,8 @@ async function scrapeWithOptimizations(url) {
         
         // Check for Cloudflare and wait for redirect - מיטוב
         const title = await page.title();
-        console.log(`📄 Initial title: ${title.substring(0, 50)}...`);
         
         if (title.includes('Just a moment') || title.includes('Checking your browser')) {
-            console.log('☁️ Cloudflare detected, waiting for bypass...');
-            
             // Smart waiting מקוצר
             for (let i = 0; i < 10; i++) { // ✅ הקטנו מ-15 ל-10
                 await page.waitForTimeout(1000);
@@ -231,10 +228,7 @@ async function scrapeWithOptimizations(url) {
                 const currentUrl = page.url();
                 const currentTitle = await page.title();
                 
-                console.log(`⏳ Attempt ${i + 1}/10 - Checking...`);
-                
                 if (currentUrl.includes('ssd=') || !currentTitle.includes('Just a moment')) {
-                    console.log('✅ Passed Cloudflare check');
                     break;
                 }
             }
@@ -249,8 +243,6 @@ async function scrapeWithOptimizations(url) {
         const cookies = await page.cookies();
         const elapsed = Date.now() - startTime;
         
-        console.log(`✅ Completed in ${elapsed}ms - Has ssd: ${finalUrl.includes('ssd=') ? 'YES' : 'NO'}`);
-        
         return {
             success: true,
             html: html,
@@ -261,7 +253,6 @@ async function scrapeWithOptimizations(url) {
         };
         
     } catch (error) {
-        console.error('❌ Error during scraping:', error.message);
         return {
             success: false,
             error: error.message,
@@ -294,7 +285,7 @@ app.post('/v1', async (req, res) => {
             });
         }
         
-        console.log(`\n📨 Request: ${url.substring(0, 80)}... (${maxTimeout}ms timeout)`);
+        console.log(`📨 Request: ${url.substring(0, 50)}...`);
         
         // Run scraping with timeout
         const result = await Promise.race([
@@ -306,7 +297,7 @@ app.post('/v1', async (req, res) => {
         
         if (result.success) {
             const elapsed = Date.now() - startTime;
-            console.log(`✅ SUCCESS - ${elapsed}ms - ${result.html?.length || 0} bytes`);
+            console.log(`✅ Success in ${elapsed}ms`);
             
             res.json({
                 status: 'ok',
@@ -320,7 +311,7 @@ app.post('/v1', async (req, res) => {
                 },
                 startTimestamp: startTime,
                 endTimestamp: Date.now(),
-                version: '4.1.0-memory-optimized',
+                version: '4.2.0-quiet',
                 hasSSd: result.hasSSd || false
             });
         } else {
@@ -328,7 +319,7 @@ app.post('/v1', async (req, res) => {
         }
         
     } catch (error) {
-        console.error(`❌ REQUEST FAILED:`, error.message);
+        console.error(`❌ Request failed:`, error.message);
         
         res.status(500).json({
             status: 'error',
@@ -349,14 +340,10 @@ app.get('/health', async (req, res) => {
         activeBrowsers: browserPool.filter(b => b.busy).length,
         memory: {
             used: Math.round(memory.heapUsed / 1024 / 1024) + 'MB',
-            total: Math.round(memory.heapTotal / 1024 / 1024) + 'MB',
-            external: Math.round(memory.external / 1024 / 1024) + 'MB'
+            total: Math.round(memory.heapTotal / 1024 / 1024) + 'MB'
         },
-        browserStats: Array.from(browserStats.entries()).map(([id, stats]) => ({
-            id: id.toString().substring(-8),
-            requests: stats.requests,
-            age: Math.round((Date.now() - stats.created) / 1000) + 's'
-        }))
+        cleanupCount: cleanupCount,
+        version: '4.2.0-quiet'
     });
 });
 
@@ -364,11 +351,12 @@ app.get('/health', async (req, res) => {
 app.get('/', (req, res) => {
     const memory = process.memoryUsage();
     res.send(`
-        <h1>⚡ Memory-Optimized Puppeteer v4.1</h1>
+        <h1>⚡ Quiet Scraper v4.2</h1>
         <p><strong>Status:</strong> Running</p>
-        <p><strong>Memory:</strong> ${Math.round(memory.heapUsed / 1024 / 1024)}MB used</p>
+        <p><strong>Memory:</strong> ${Math.round(memory.heapUsed / 1024 / 1024)}MB</p>
         <p><strong>Browsers:</strong> ${browserPool.length} (${browserPool.filter(b => b.busy).length} busy)</p>
-        <p><strong>Optimizations:</strong> ✅ Memory limits, ✅ Browser recycling, ✅ Auto cleanup</p>
+        <p><strong>Cleanups:</strong> ${cleanupCount} performed</p>
+        <p><strong>Mode:</strong> Silent operation 🤫</p>
     `);
 });
 
@@ -376,24 +364,23 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`
 ╔════════════════════════════════════════╗
-║   ⚡ Memory-Optimized Scraper v4.1     ║
+║   ⚡ Quiet Scraper v4.2                ║
 ║   Port: ${PORT}                            ║
-║   Max Browsers: ${MAX_BROWSERS}                     ║
-║   Memory Limits: ENABLED ✅            ║
+║   Mode: Silent Memory Management       ║
 ╚════════════════════════════════════════╝
     `);
     
-    console.log('🚀 Initializing optimized browser pool...');
+    console.log('🚀 Initializing...');
     await initBrowserPool();
     
-    // ✅ הפעלת ניקוי זיכרון כל דקה
-    setInterval(memoryCleanup, 60000);
-    console.log('✅ Ready with memory management!');
+    // ✅ הפעלת ניקוי שקט כל דקה
+    setInterval(silentMemoryCleanup, 60000);
+    console.log('✅ Ready! Running in quiet mode.');
 });
 
 // Graceful shutdown עם ניקוי יסודי
 process.on('SIGTERM', async () => {
-    console.log('📛 SIGTERM received, cleaning up...');
+    console.log('📛 Shutting down...');
     for (const browserObj of browserPool) {
         await browserObj.browser.close().catch(() => {});
     }
@@ -402,13 +389,19 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
-// Handle errors
+// Handle errors בשקט
 process.on('uncaughtException', (error) => {
-    console.error('💥 Uncaught Exception:', error.message);
+    // רק שגיאות קריטיות
+    if (error.message.includes('ENOMEM') || error.message.includes('FATAL')) {
+        console.error('💥 Critical error:', error.message);
+    }
     // נסה לנקות זיכרון
     if (global.gc) global.gc();
 });
 
 process.on('unhandledRejection', (error) => {
-    console.error('💥 Unhandled Rejection:', error.message);
+    // רק שגיאות קריטיות
+    if (error && error.message && (error.message.includes('ENOMEM') || error.message.includes('FATAL'))) {
+        console.error('💥 Critical rejection:', error.message);
+    }
 });
